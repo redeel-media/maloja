@@ -41,8 +41,9 @@ class Listenbrainz(APIHandler):
 		if not client:
 			raise InvalidAuthException()
 
-		keys = json.loads(list(keys)[0])
 		try:
+			if not "listen_type" in keys:
+				keys = json.loads(list(keys)[0])
 			listentype = keys["listen_type"]
 			payload = keys["payload"]
 		except Exception:
