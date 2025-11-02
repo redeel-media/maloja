@@ -127,10 +127,10 @@ def import_scrobbles(inputf):
 
 			if (result['CONFIDENT_IMPORT'] + result['UNCERTAIN_IMPORT']) % 1000 == 0:
 				print(f"Imported {result['CONFIDENT_IMPORT'] + result['UNCERTAIN_IMPORT']} scrobbles...")
-				add_scrobbles(scrobblebuffer)
+				add_scrobbles(scrobblebuffer, invalidate_cache=False)  # Skip cache invalidation during bulk import
 				scrobblebuffer = []
 
-	add_scrobbles(scrobblebuffer)
+	add_scrobbles(scrobblebuffer)  # Final batch - invalidates cache (default invalidate_cache=True)
 
 	msg = f"Successfully imported {result['CONFIDENT_IMPORT'] + result['UNCERTAIN_IMPORT']} scrobbles"
 	if result['UNCERTAIN_IMPORT'] > 0:

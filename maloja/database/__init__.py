@@ -26,6 +26,8 @@ from ..apis import apikeystore
 from . import sqldb
 from . import dbcache
 from . import exceptions
+from . import migrations
+from . import homepage_cache
 
 # doreah toolkit
 from doreah.logging import log
@@ -415,11 +417,85 @@ def get_albums_artist_appears_on(dbconn=None,**keys):
 def get_tracks_without_album(dbconn=None,resolve_ids=True):
 	return get_charts_tracks(album=None,timerange=alltime(),resolve_ids=resolve_ids,dbconn=dbconn)
 
+def _map_timerange_to_cache_key(timerange, entity_type="artists"):
+	"""
+	Map MTRange object to cache key string for homepage cache lookup
+
+	Maps calendar-based timerange types to cached homepage tiles.
+	Returns None if the timerange is not cacheable (falls back to query).
+
+	IMPORTANT: Homepage cache only stores the CURRENT periods (this year, this month,
+	this week, today). Historical timeranges (e.g., 2023, January 2024) must bypass
+	the cache and query the database with proper time filters.
+
+	Args:
+		timerange: MTRange object (e.g., result of today(), thisweek(), alltime())
+		entity_type: "artists", "tracks", or "albums"
+
+	Returns:
+		Cache key string (e.g., "home:top_artists:week") or None if not cacheable
+	"""
+	from ..malojatime import MTRangeWeek, MTRangeComposite, MTRangeGregorian
+	from ..malojatime import thisyear, thismonth, thisweek, today
+
+	# Map timerange type to cache key suffix based on calendar boundaries
+	# CRITICAL: Only use cache if timerange equals the CURRENT period
+	suffix = None
+
+	if isinstance(timerange, MTRangeGregorian):
+		# Gregorian ranges have different precision levels
+		# precision=3 → day (today), precision=2 → month, precision=1 → year
+		# Only cache if this is the CURRENT day/month/year
+		if timerange.precision == 3 and timerange == today():
+			suffix = "today"
+		elif timerange.precision == 2 and timerange == thismonth():
+			suffix = "month"
+		elif timerange.precision == 1 and timerange == thisyear():
+			suffix = "year"
+	elif isinstance(timerange, MTRangeWeek):
+		# Only cache if this is the CURRENT week
+		if timerange == thisweek():
+			suffix = "week"
+	elif isinstance(timerange, MTRangeComposite):
+		# All time (unlimited)
+		if timerange.unlimited():
+			suffix = "all"
+
+	if suffix:
+		return f"home:top_{entity_type}:{suffix}"
+	return None
+
+
 @waitfordb
 def get_charts_artists(dbconn=None,resolve_ids=True,**keys):
-	(since,to) = keys.get('timerange').timestamps()
+	timerange = keys.get('timerange')
 	separate = keys.get('separate',False)
-	result = sqldb.count_scrobbles_by_artist(since=since,to=to,resolve_ids=resolve_ids,associated=(not separate),dbconn=dbconn)
+
+	# Try homepage cache first for cacheable timeranges
+	# Cache is only usable when resolve_ids=True
+	# Note: Cache stores per-artist data (not associated), so it works best with separate=True
+	# IMPORTANT: Cache only stores 14 items. Charts pages set bypass_cache=True to get
+	# all results for pagination. Homepage uses cache for fast loading of top 14 tiles.
+	bypass_cache = keys.get('bypass_cache', False)
+
+	if resolve_ids and timerange and not bypass_cache:
+		cache_key = _map_timerange_to_cache_key(timerange, entity_type="artists")
+		if cache_key:
+			try:
+				cached_data = homepage_cache.get_cached_tile(sqldb.engine, cache_key)
+				if cached_data is not None:
+					# Cache hit - return cached tiles
+					# Format: List[{"artist": str, "rank": int, "scrobbles": int}]
+					return cached_data
+				# Cache miss - exceptional, should only happen during rebuild
+				log(f"[Cache] MISS for {cache_key} - cache unavailable, falling back to query", module="database", importance=0, color="yellow")
+			except Exception as e:
+				# Cache error - log and fall back to query
+				log(f"[Cache] Error retrieving {cache_key}: {e}", module="database")
+
+	# Cache miss or not cacheable - use direct scrobbles query (fast fallback)
+	(since,to) = timerange.timestamps()
+	result = sqldb.get_top_artists_direct(since=since,to=to,resolve_ids=resolve_ids,associated=(not separate),dbconn=dbconn)
 
 	if resolve_ids:
 		# only add associated info if we resolve
@@ -431,28 +507,84 @@ def get_charts_artists(dbconn=None,resolve_ids=True,**keys):
 
 @waitfordb
 def get_charts_tracks(dbconn=None,resolve_ids=True,**keys):
-	(since,to) = keys.get('timerange').timestamps()
+	timerange = keys.get('timerange')
+
+	# Try homepage cache first (only for simple cases without artist/album filters)
+	# IMPORTANT: Cache only stores 14 items. Charts pages set bypass_cache=True to get
+	# all results for pagination. Homepage uses cache for fast loading of top 14 tiles.
+	bypass_cache = keys.get('bypass_cache', False)
+
+	if resolve_ids and timerange and 'artist' not in keys and 'album' not in keys and not bypass_cache:
+		cache_key = _map_timerange_to_cache_key(timerange, entity_type="tracks")
+		if cache_key:
+			try:
+				cached_data = homepage_cache.get_cached_tile(sqldb.engine, cache_key)
+				if cached_data is not None:
+					# Transform cached strings to dict format (NO DATABASE QUERIES!)
+					for entry in cached_data:
+						entry['track'] = {
+							'title': entry['track'],  # Cast string to dict
+							'artists': entry['artists'],  # Already have it from cache
+							'track_id': entry['track_id']  # Include track_id to avoid lookups
+						}
+					return cached_data
+				log(f"[Cache] MISS for {cache_key} - cache unavailable, falling back to query", module="database", importance=0, color="yellow")
+			except Exception as e:
+				log(f"[Cache] Error retrieving {cache_key}: {e}", module="database")
+
+	# Cache miss or not cacheable - use direct scrobbles query when possible
+	(since,to) = timerange.timestamps()
 	if 'artist' in keys:
+		# Filtered queries use specialized methods
 		result = sqldb.count_scrobbles_by_track_of_artist(since=since,to=to,artist=keys['artist'],associated=keys.get('associated',False),resolve_ids=resolve_ids,dbconn=dbconn)
 	elif 'album' in keys:
 		result = sqldb.count_scrobbles_by_track_of_album(since=since,to=to,album=keys['album'],resolve_ids=resolve_ids,dbconn=dbconn)
 	else:
-		result = sqldb.count_scrobbles_by_track(since=since,to=to,resolve_ids=resolve_ids,dbconn=dbconn)
+		# Use fast direct scrobbles query for unfiltered top tracks
+		result = sqldb.get_top_tracks_direct(since=since,to=to,resolve_ids=resolve_ids,dbconn=dbconn)
 	return result
 
 @waitfordb
 def get_charts_albums(dbconn=None,resolve_ids=True,only_own_albums=False,**keys):
 	# TODO: different scrobble numbers for only own tracks on own album etc?
-	(since,to) = keys.get('timerange').timestamps()
+	timerange = keys.get('timerange')
+
+	# Try homepage cache first (only for simple cases without artist filter)
+	# IMPORTANT: Cache only stores 14 items. Charts pages set bypass_cache=True to get
+	# all results for pagination. Homepage uses cache for fast loading of top 14 tiles.
+	bypass_cache = keys.get('bypass_cache', False)
+
+	if resolve_ids and timerange and 'artist' not in keys and not bypass_cache:
+		cache_key = _map_timerange_to_cache_key(timerange, entity_type="albums")
+		if cache_key:
+			try:
+				cached_data = homepage_cache.get_cached_tile(sqldb.engine, cache_key)
+				if cached_data is not None:
+					# Transform cached strings to dict format (NO DATABASE QUERIES!)
+					for entry in cached_data:
+						entry['album'] = {
+							'albumtitle': entry['album'],  # Cast string to dict
+							'artists': entry['artists'],  # Already have it from cache
+							'album_id': entry['album_id']  # Include album_id to avoid lookups
+						}
+					return cached_data
+				log(f"[Cache] MISS for {cache_key} - cache unavailable, falling back to query", module="database", importance=0, color="yellow")
+			except Exception as e:
+				log(f"[Cache] Error retrieving {cache_key}: {e}", module="database")
+
+	# Cache miss or not cacheable - use direct scrobbles query when possible
+	(since,to) = timerange.timestamps()
 
 	if 'artist' in keys:
+		# Filtered queries use specialized methods
 		artist = sqldb.get_artist(sqldb.get_artist_id(keys['artist']))
 		result = sqldb.count_scrobbles_by_album_combined(since=since,to=to,artist=artist,associated=keys.get('associated',False),resolve_ids=resolve_ids,dbconn=dbconn)
 		if only_own_albums:
 			# TODO: this doesnt take associated into account and doesnt change ranks
 			result = [e for e in result if artist in (e['album']['artists'] or [])]
 	else:
-		result = sqldb.count_scrobbles_by_album(since=since,to=to,resolve_ids=resolve_ids,dbconn=dbconn)
+		# Use fast direct scrobbles query for unfiltered top albums
+		result = sqldb.get_top_albums_direct(since=since,to=to,resolve_ids=resolve_ids,dbconn=dbconn)
 	return result
 
 @waitfordb
@@ -706,10 +838,14 @@ def artist_info(dbconn=None,**keys):
 		c = [e for e in alltimecharts if e["artist"] == artist]
 		position = c[0]["rank"] if len(c) > 0 else None
 		others = sqldb.get_associated_artists(artist,dbconn=dbconn)
-		result.update({
-			"position":position,
-			"associated":others,
-			"medals":{
+		# Optimized: Get both medals and topweeks in 1 query instead of several queries
+		try:
+			medals_data = sqldb.get_artist_medals_and_topweeks(artist_id, associated=True, dbconn=dbconn)
+			medals = medals_data.get('medals', {'gold': [], 'silver': [], 'bronze': []})
+			topweeks_count = medals_data.get('topweeks', 0)
+		except Exception:
+			# Fall back to old method if optimized fails (shouldn't happen)
+			medals = {
 				"gold": [year.desc() for year in ranges(step='year') if (year != tyr) and any(
 					(e.get('artist_id') == artist_id) and (e.get('rank') == 1) for e in
 					sqldb.count_scrobbles_by_artist(since=year.first_stamp(),to=year.last_stamp(),resolve_ids=False,dbconn=dbconn)
@@ -722,20 +858,25 @@ def artist_info(dbconn=None,**keys):
 					(e.get('artist_id') == artist_id) and (e.get('rank') == 3) for e in
 					sqldb.count_scrobbles_by_artist(since=year.first_stamp(),to=year.last_stamp(),resolve_ids=False,dbconn=dbconn)
 				)]
-			},
-			"topweeks":len([
+			}
+			topweeks_count = len([
 				week for week in ranges(step="week") if (week != twk) and any(
 					(e.get('artist_id') == artist_id) and (e.get('rank') == 1) for e in
 					sqldb.count_scrobbles_by_artist(since=week.first_stamp(),to=week.last_stamp(),resolve_ids=False,associated=True,dbconn=dbconn)
 				)
-				# we don't need to check the whole thing, just until rank is lower, but... well, its a list comprehension
 			])
+
+		result.update({
+			"position":position,
+			"associated":others,
+			"medals": medals,
+			"topweeks": topweeks_count  # Optimized: 1 query instead of several
 		})
 
 	else:
 		replaceartist = parent_artists[0]
-		c = [e for e in alltimecharts if e["artist"] == replaceartist][0]
-		position = c["rank"]
+		c = next((e for e in alltimecharts if e["artist"] == replaceartist), None)
+		position = c["rank"] if c else None
 		result.update({
 			"replace":replaceartist,
 			"position":position
@@ -755,12 +896,17 @@ def track_info(dbconn=None,**keys):
 	if not track_id: raise exceptions.TrackDoesNotExist(track)
 
 	track = sqldb.get_track(track_id,dbconn=dbconn)
-	alltimecharts = get_charts_tracks(timerange=alltime(),resolve_ids=False,dbconn=dbconn)
-	#scrobbles = get_scrobbles_num(track=track,timerange=alltime())
+	alltimecharts = get_charts_tracks(timerange=alltime(),dbconn=dbconn)
 
-	c = [e for e in alltimecharts if e["track_id"] == track_id][0]
-	scrobbles = c["scrobbles"]
-	position = c["rank"]
+	# Find track in charts, fallback to counting scrobbles if not found
+	c = next((e for e in alltimecharts if e["track_id"] == track_id), None)
+	if c:
+		scrobbles = c["scrobbles"]
+		position = c["rank"]
+	else:
+		# Track not in charts (no scrobbles or chart limit reached)
+		scrobbles = get_scrobbles_num(track=track,timerange=alltime())
+		position = None
 	cert = None
 	threshold_gold, threshold_platinum, threshold_diamond = malojaconfig["SCROBBLES_GOLD","SCROBBLES_PLATINUM","SCROBBLES_DIAMOND"]
 	if scrobbles >= threshold_diamond: cert = "diamond"
@@ -770,11 +916,14 @@ def track_info(dbconn=None,**keys):
 	twk = thisweek()
 	tyr = thisyear()
 
-	return {
-		"track":track,
-		"scrobbles":scrobbles,
-		"position":position,
-		"medals":{
+	# Optimized: Get both medals and topweeks in 1 query instead of several
+	try:
+		medals_data = sqldb.get_track_medals_and_topweeks(track_id, dbconn=dbconn)
+		medals = medals_data.get('medals', {'gold': [], 'silver': [], 'bronze': []})
+		topweeks_count = medals_data.get('topweeks', 0)
+	except Exception:
+		# Fall back to old method if optimized fails (shouldn't happen)
+		medals = {
 			"gold": [year.desc() for year in ranges(step='year') if (year != tyr) and any(
 				(e.get('track_id') == track_id) and (e.get('rank') == 1) for e in
 				sqldb.count_scrobbles_by_track(since=year.first_stamp(),to=year.last_stamp(),resolve_ids=False,dbconn=dbconn)
@@ -787,14 +936,21 @@ def track_info(dbconn=None,**keys):
 				(e.get('track_id') == track_id) and (e.get('rank') == 3) for e in
 				sqldb.count_scrobbles_by_track(since=year.first_stamp(),to=year.last_stamp(),resolve_ids=False,dbconn=dbconn)
 			)]
-		},
-		"certification":cert,
-		"topweeks":len([
+		}
+		topweeks_count = len([
 			week for week in ranges(step="week") if (week != twk) and any(
 				(e.get('track_id') == track_id) and (e.get('rank') == 1) for e in
 				sqldb.count_scrobbles_by_track(since=week.first_stamp(),to=week.last_stamp(),resolve_ids=False,dbconn=dbconn)
 			)
-		]),
+		])
+
+	return {
+		"track":track,
+		"scrobbles":scrobbles,
+		"position":position,
+		"medals": medals,
+		"certification":cert,
+		"topweeks": topweeks_count,  # Optimized: 1 query instead of several
 		"id":track_id
 	}
 
@@ -816,10 +972,16 @@ def album_info(dbconn=None,reduced=False,**keys):
 		scrobbles = get_scrobbles_num(album=album,timerange=alltime())
 	else:
 		alltimecharts = get_charts_albums(timerange=alltime(),dbconn=dbconn)
-		c = [e for e in alltimecharts if e["album"] == album][0]
-		scrobbles = c["scrobbles"]
-		position = c["rank"]
-		extrainfo['position'] = position
+		# Find album in charts, fallback to counting scrobbles if not found
+		c = next((e for e in alltimecharts if e["album"] == album), None)
+		if c:
+			scrobbles = c["scrobbles"]
+			position = c["rank"]
+			extrainfo['position'] = position
+		else:
+			# Album not in charts (no scrobbles or chart limit reached)
+			scrobbles = get_scrobbles_num(album=album,timerange=alltime())
+			extrainfo['position'] = None
 
 	cert = None
 	threshold_gold, threshold_platinum, threshold_diamond = malojaconfig["SCROBBLES_GOLD_ALBUM","SCROBBLES_PLATINUM_ALBUM","SCROBBLES_DIAMOND_ALBUM"]
@@ -832,8 +994,15 @@ def album_info(dbconn=None,reduced=False,**keys):
 	else:
 		twk = thisweek()
 		tyr = thisyear()
-		extrainfo.update({
-			"medals":{
+
+		# Optimized: Get both medals and topweeks in 1 query instead of several
+		try:
+			medals_data = sqldb.get_album_medals_and_topweeks(album_id, dbconn=dbconn)
+			medals = medals_data.get('medals', {'gold': [], 'silver': [], 'bronze': []})
+			topweeks_count = medals_data.get('topweeks', 0)
+		except Exception:
+			# Fall back to old method if optimized fails (shouldn't happen)
+			medals = {
 				"gold": [year.desc() for year in ranges(step='year') if (year != tyr) and any(
 					(e.get('album_id') == album_id) and (e.get('rank') == 1) for e in
 					sqldb.count_scrobbles_by_album(since=year.first_stamp(),to=year.last_stamp(),resolve_ids=False,dbconn=dbconn)
@@ -846,13 +1015,17 @@ def album_info(dbconn=None,reduced=False,**keys):
 					(e.get('album_id') == album_id) and (e.get('rank') == 3) for e in
 					sqldb.count_scrobbles_by_album(since=year.first_stamp(),to=year.last_stamp(),resolve_ids=False,dbconn=dbconn)
 				)]
-			},
-			"topweeks":len([
+			}
+			topweeks_count = len([
 				week for week in ranges(step="week") if (week != twk) and any(
 					(e.get('album_id') == album_id) and (e.get('rank') == 1) for e in
 					sqldb.count_scrobbles_by_album(since=week.first_stamp(),to=week.last_stamp(),resolve_ids=False,dbconn=dbconn)
 				)
 			])
+
+		extrainfo.update({
+			"medals": medals,
+			"topweeks": topweeks_count  # Optimized: 1 query instead of several
 		})
 
 	return {
@@ -965,13 +1138,14 @@ def start_db():
 
 	dbstatus['complete'] = True
 
-	# cache some stuff that we'll probably need
-	with sqldb.engine.connect() as dbconn:
-		with dbconn.begin():
-			for week in ranges(step='week'):
-				sqldb.count_scrobbles_by_artist(since=week.first_stamp(),to=week.last_stamp(),resolve_ids=False,associated=True,dbconn=dbconn)
-				sqldb.count_scrobbles_by_track(since=week.first_stamp(),to=week.last_stamp(),resolve_ids=False,dbconn=dbconn)
-				sqldb.count_scrobbles_by_album(since=week.first_stamp(),to=week.last_stamp(),resolve_ids=False,dbconn=dbconn)
+	# Build homepage cache if needed (non-blocking)
+	# This checks if cache tiles exist and rebuilds only if missing
+	# If scrobbles were imported above, cache was already rebuilt via invalidation
+	try:
+		homepage_cache.rebuild_cache_if_needed(sqldb.engine)
+	except Exception as e:
+		log(f"Warning: Failed to rebuild homepage cache: {e}")
+		# Don't fail startup if cache build fails - fallback queries will still work
 
 
 

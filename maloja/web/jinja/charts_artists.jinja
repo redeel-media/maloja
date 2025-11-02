@@ -7,7 +7,7 @@
 	<script src="/datechange.js" async></script>
 {% endblock %}
 
-{% set charts = dbc.get_charts_artists(filterkeys,limitkeys,specialkeys) %}
+{% set charts = dbc.get_charts_artists(filterkeys,limitkeys,specialkeys,{'bypass_cache':True}) %}
 
 
 

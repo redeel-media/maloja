@@ -42,7 +42,8 @@ if malojaconfig['USE_GLOBAL_CACHE']:
 			else:
 				conn = None
 			global hits, misses
-			key = (serialize(args),serialize(kwargs), inner_func, kwargs.get("since"), kwargs.get("to"))
+			# since/to are already captured in serialize(args), no need to extract separately
+			key = (serialize(args),serialize(kwargs), inner_func)
 			# TODO: also factor in default values to get better chance of hits
 
 			try:
