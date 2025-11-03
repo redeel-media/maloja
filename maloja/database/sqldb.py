@@ -14,7 +14,6 @@ from ..pkg_global.conf import data_dir
 from .dbcache import cached_wrapper, cached_wrapper_individual, invalidate_caches, invalidate_entity_cache
 from . import exceptions as exc
 from . import no_aux_mode
-from . import homepage_cache
 
 from doreah.logging import log
 from doreah.regular import runhourly, runmonthly
@@ -498,14 +497,13 @@ def add_scrobble(scrobbledict: ScrobbleDict, update_album=False, dbconn=None):
 
 
 @connection_provider
-def add_scrobbles(scrobbleslist: list[ScrobbleDict], update_album=False, invalidate_cache=True, dbconn=None) -> tuple[int, int, int]:
+def add_scrobbles(scrobbleslist: list[ScrobbleDict], update_album=False, dbconn=None) -> tuple[int, int, int]:
 	"""
 	Add scrobbles to the database.
 
 	Args:
 		scrobbleslist: List of scrobble dictionaries to insert
 		update_album: Whether to update album information
-		invalidate_cache: Whether to invalidate homepage cache (set False during bulk imports)
 		dbconn: Database connection
 
 	Returns:
@@ -540,11 +538,6 @@ def add_scrobbles(scrobbleslist: list[ScrobbleDict], update_album=False, invalid
 					exists += 1
 				else:
 					errors += 1
-
-		# Invalidate homepage cache for successfully inserted scrobbles
-		# Skip during bulk imports (invalidate_cache=False) to avoid rebuilding cache thousands of times
-		if successful_timestamps and invalidate_cache:
-			homepage_cache.invalidate_homepage_cache(engine, conn=dbconn)
 
 	if errors > 0: log(f"{errors} Scrobbles have not been written to database (duplicate timestamps)!", color='red')
 	if exists > 0: log(f"{exists} Scrobbles have not been written to database (already exist)", color='orange')

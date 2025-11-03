@@ -87,16 +87,17 @@ if malojaconfig['USE_GLOBAL_CACHE']:
 
 	@no_aux_mode
 	def invalidate_caches(scrobbletime=None):
+		# Lazy import to avoid circular dependency (sqldb imports from dbcache)
+		from . import sqldb, homepage_cache
 
-		cleared, kept = 0, 0
-		for k in cache.keys():
-			# VERY BIG TODO: differentiate between None as in 'unlimited timerange' and None as in 'time doesnt matter here'!
-			if scrobbletime is None or ((k[3] is None or scrobbletime >= k[3]) and (k[4] is None or scrobbletime <= k[4])):
-				cleared += 1
-				del cache[k]
-			else:
-				kept += 1
-		log(f"Invalidated {cleared} of {cleared+kept} DB cache entries")
+		# Clear all cache entries
+		# Note: ideally we'd only invalidate caches affected by scrobbletime,
+		# but cache keys don't store timerange info in accessible format
+		cache.clear()
+		log(f"Invalidated all DB cache entries")
+
+		# Also invalidate homepage cache
+		homepage_cache.invalidate_homepage_cache(sqldb.engine)
 
 	@no_aux_mode
 	def invalidate_entity_cache():
@@ -130,7 +131,10 @@ else:
 	def cached_wrapper_individual(func):
 		return func
 	def invalidate_caches(scrobbletime=None):
-		return None
+		# Lazy import to avoid circular dependency (sqldb imports from dbcache)
+		from . import sqldb, homepage_cache
+		# Still invalidate homepage cache even when LRU cache is disabled
+		homepage_cache.invalidate_homepage_cache(sqldb.engine)
 	def invalidate_entity_cache():
 		return None
 

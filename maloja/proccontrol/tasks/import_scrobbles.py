@@ -22,6 +22,7 @@ outputs = {
 def import_scrobbles(inputf):
 
 	from ...database.sqldb import add_scrobbles
+	from ...database.dbcache import invalidate_caches
 
 	result = {
 		"CONFIDENT_IMPORT": 0,
@@ -127,10 +128,11 @@ def import_scrobbles(inputf):
 
 			if (result['CONFIDENT_IMPORT'] + result['UNCERTAIN_IMPORT']) % 1000 == 0:
 				print(f"Imported {result['CONFIDENT_IMPORT'] + result['UNCERTAIN_IMPORT']} scrobbles...")
-				add_scrobbles(scrobblebuffer, invalidate_cache=False)  # Skip cache invalidation during bulk import
+				add_scrobbles(scrobblebuffer)
 				scrobblebuffer = []
 
-	add_scrobbles(scrobblebuffer)  # Final batch - invalidates cache (default invalidate_cache=True)
+	add_scrobbles(scrobblebuffer)  # Final batch
+	invalidate_caches()  # Invalidate all caches once at the end of bulk import
 
 	msg = f"Successfully imported {result['CONFIDENT_IMPORT'] + result['UNCERTAIN_IMPORT']} scrobbles"
 	if result['UNCERTAIN_IMPORT'] > 0:

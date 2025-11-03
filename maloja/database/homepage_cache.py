@@ -546,7 +546,6 @@ def _async_rebuild_worker(engine: Engine) -> None:
 	global _rebuild_in_progress
 
 	try:
-		log("[Cache] Background rebuild started")
 		build_homepage_cache(engine)
 		log("[Cache] Background rebuild completed successfully")
 	except Exception as e:
@@ -592,7 +591,6 @@ def schedule_async_rebuild(engine: Engine) -> bool:
 		)
 		_rebuild_thread.start()
 
-		log("[Cache] Scheduled async cache rebuild")
 		return True
 
 
