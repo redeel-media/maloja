@@ -20,11 +20,9 @@ import sqlalchemy as sql
 
 def get_migrations_folder():
 	"""Get the path to the migrations folder"""
-	# Migrations are in the root of the project
-	# Navigate up from database module to project root
 	db_module = Path(__file__).parent
-	project_root = db_module.parent.parent
-	migrations_folder = project_root / 'migrations'
+	maloja_package = db_module.parent  
+	migrations_folder = maloja_package / 'migrations'
 	return migrations_folder
 
 
@@ -343,7 +341,7 @@ def run_migrations(engine):
 		log("Creating backup before applying migrations...")
 		try:
 			from ..proccontrol.tasks.backup import backup
-			backup_file = backup(include_images=False)
+			backup_file = backup(targetfolder=data_dir['backups'](), include_images=False)
 			log(f"Backup created successfully: {backup_file}")
 		except Exception as e:
 			log(f"CRITICAL: Cannot create backup before migrations!")
