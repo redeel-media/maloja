@@ -148,7 +148,10 @@ def _add_ranks_to_results(
 		# Add artists if provided (for tracks/albums)
 		if artists_idx is not None:
 			artists_str = row[artists_idx]
-			entry["artists"] = artists_str.split(artist_separator) if artists_str else []
+			artists_list = artists_str.split(artist_separator) if artists_str else []
+			# Deduplicate artists: GROUP_CONCAT without DISTINCT creates duplicates (one per scrobble),
+			# but DISTINCT forces comma separator which breaks artists with commas in names
+			entry["artists"] = list(dict.fromkeys(artists_list))
 
 		results.append(entry)
 	return results
@@ -316,12 +319,11 @@ def _build_top_tracks_tiles(conn: Connection, current_time: int) -> int:
 	today_start, week_start, month_start, year_start = _calculate_calendar_ranges(current_time, conn)
 
 	# Base query for time-filtered top tracks
-	# Note: SQLite DISTINCT aggregates can only have one argument, so we use default comma separator
 	base_query = """
 		SELECT
 			t.id,
 			t.title,
-			GROUP_CONCAT(DISTINCT a.name) as artists,
+			GROUP_CONCAT(a.name, '||') as artists,
 			COUNT(*) as scrobbles
 		FROM scrobbles s
 		JOIN tracks t ON s.track_id = t.id
@@ -335,25 +337,25 @@ def _build_top_tracks_tiles(conn: Connection, current_time: int) -> int:
 
 	# Today
 	result = conn.execute(sql.text(base_query), {"start_ts": today_start, "limit": TOP_N_LIMIT})
-	top_tracks_today = _add_ranks_to_results(result.fetchall(), field_name="track", name_idx=1, id_idx=0, scrobbles_idx=3, artists_idx=2, artist_separator=',')
+	top_tracks_today = _add_ranks_to_results(result.fetchall(), field_name="track", name_idx=1, id_idx=0, scrobbles_idx=3, artists_idx=2, artist_separator='||')
 	_store_cache_entry(conn, CacheKey.TOP_TRACKS_TODAY.value, top_tracks_today, current_time)
 	tiles_built += 1
 
 	# This Week
 	result = conn.execute(sql.text(base_query), {"start_ts": week_start, "limit": TOP_N_LIMIT})
-	top_tracks_week = _add_ranks_to_results(result.fetchall(), field_name="track", name_idx=1, id_idx=0, scrobbles_idx=3, artists_idx=2, artist_separator=',')
+	top_tracks_week = _add_ranks_to_results(result.fetchall(), field_name="track", name_idx=1, id_idx=0, scrobbles_idx=3, artists_idx=2, artist_separator='||')
 	_store_cache_entry(conn, CacheKey.TOP_TRACKS_WEEK.value, top_tracks_week, current_time)
 	tiles_built += 1
 
 	# This Month
 	result = conn.execute(sql.text(base_query), {"start_ts": month_start, "limit": TOP_N_LIMIT})
-	top_tracks_month = _add_ranks_to_results(result.fetchall(), field_name="track", name_idx=1, id_idx=0, scrobbles_idx=3, artists_idx=2, artist_separator=',')
+	top_tracks_month = _add_ranks_to_results(result.fetchall(), field_name="track", name_idx=1, id_idx=0, scrobbles_idx=3, artists_idx=2, artist_separator='||')
 	_store_cache_entry(conn, CacheKey.TOP_TRACKS_MONTH.value, top_tracks_month, current_time)
 	tiles_built += 1
 
 	# This Year
 	result = conn.execute(sql.text(base_query), {"start_ts": year_start, "limit": TOP_N_LIMIT})
-	top_tracks_year = _add_ranks_to_results(result.fetchall(), field_name="track", name_idx=1, id_idx=0, scrobbles_idx=3, artists_idx=2, artist_separator=',')
+	top_tracks_year = _add_ranks_to_results(result.fetchall(), field_name="track", name_idx=1, id_idx=0, scrobbles_idx=3, artists_idx=2, artist_separator='||')
 	_store_cache_entry(conn, CacheKey.TOP_TRACKS_YEAR.value, top_tracks_year, current_time)
 	tiles_built += 1
 
@@ -362,7 +364,7 @@ def _build_top_tracks_tiles(conn: Connection, current_time: int) -> int:
 		SELECT
 			t.id,
 			t.title,
-			GROUP_CONCAT(DISTINCT a.name) as artists,
+			GROUP_CONCAT(a.name, '||') as artists,
 			COUNT(*) as scrobbles
 		FROM scrobbles s
 		JOIN tracks t ON s.track_id = t.id
@@ -372,7 +374,7 @@ def _build_top_tracks_tiles(conn: Connection, current_time: int) -> int:
 		ORDER BY scrobbles DESC
 		LIMIT :limit
 	"""), {"limit": TOP_N_LIMIT})
-	top_tracks_all = _add_ranks_to_results(result.fetchall(), field_name="track", name_idx=1, id_idx=0, scrobbles_idx=3, artists_idx=2, artist_separator=',')
+	top_tracks_all = _add_ranks_to_results(result.fetchall(), field_name="track", name_idx=1, id_idx=0, scrobbles_idx=3, artists_idx=2, artist_separator='||')
 	_store_cache_entry(conn, CacheKey.TOP_TRACKS_ALL.value, top_tracks_all, current_time)
 	tiles_built += 1
 
@@ -391,7 +393,7 @@ def _build_top_albums_tiles(conn: Connection, current_time: int) -> int:
 		SELECT
 			alb.id,
 			alb.albtitle,
-			GROUP_CONCAT(DISTINCT a.name) as artists,
+			GROUP_CONCAT(a.name, '||') as artists,
 			COUNT(*) as scrobbles
 		FROM scrobbles s
 		JOIN tracks t ON s.track_id = t.id
@@ -406,25 +408,25 @@ def _build_top_albums_tiles(conn: Connection, current_time: int) -> int:
 
 	# Today
 	result = conn.execute(sql.text(base_query), {"start_ts": today_start, "limit": TOP_N_LIMIT})
-	top_albums_today = _add_ranks_to_results(result.fetchall(), field_name="album", name_idx=1, id_idx=0, scrobbles_idx=3, artists_idx=2, artist_separator=', ')
+	top_albums_today = _add_ranks_to_results(result.fetchall(), field_name="album", name_idx=1, id_idx=0, scrobbles_idx=3, artists_idx=2, artist_separator='||')
 	_store_cache_entry(conn, CacheKey.TOP_ALBUMS_TODAY.value, top_albums_today, current_time)
 	tiles_built += 1
 
 	# This Week
 	result = conn.execute(sql.text(base_query), {"start_ts": week_start, "limit": TOP_N_LIMIT})
-	top_albums_week = _add_ranks_to_results(result.fetchall(), field_name="album", name_idx=1, id_idx=0, scrobbles_idx=3, artists_idx=2, artist_separator=', ')
+	top_albums_week = _add_ranks_to_results(result.fetchall(), field_name="album", name_idx=1, id_idx=0, scrobbles_idx=3, artists_idx=2, artist_separator='||')
 	_store_cache_entry(conn, CacheKey.TOP_ALBUMS_WEEK.value, top_albums_week, current_time)
 	tiles_built += 1
 
 	# This Month
 	result = conn.execute(sql.text(base_query), {"start_ts": month_start, "limit": TOP_N_LIMIT})
-	top_albums_month = _add_ranks_to_results(result.fetchall(), field_name="album", name_idx=1, id_idx=0, scrobbles_idx=3, artists_idx=2, artist_separator=', ')
+	top_albums_month = _add_ranks_to_results(result.fetchall(), field_name="album", name_idx=1, id_idx=0, scrobbles_idx=3, artists_idx=2, artist_separator='||')
 	_store_cache_entry(conn, CacheKey.TOP_ALBUMS_MONTH.value, top_albums_month, current_time)
 	tiles_built += 1
 
 	# This Year
 	result = conn.execute(sql.text(base_query), {"start_ts": year_start, "limit": TOP_N_LIMIT})
-	top_albums_year = _add_ranks_to_results(result.fetchall(), field_name="album", name_idx=1, id_idx=0, scrobbles_idx=3, artists_idx=2, artist_separator=', ')
+	top_albums_year = _add_ranks_to_results(result.fetchall(), field_name="album", name_idx=1, id_idx=0, scrobbles_idx=3, artists_idx=2, artist_separator='||')
 	_store_cache_entry(conn, CacheKey.TOP_ALBUMS_YEAR.value, top_albums_year, current_time)
 	tiles_built += 1
 
@@ -433,7 +435,7 @@ def _build_top_albums_tiles(conn: Connection, current_time: int) -> int:
 		SELECT
 			alb.id,
 			alb.albtitle,
-			GROUP_CONCAT(DISTINCT a.name) as artists,
+			GROUP_CONCAT(a.name, '||') as artists,
 			COUNT(*) as scrobbles
 		FROM scrobbles s
 		JOIN tracks t ON s.track_id = t.id
@@ -444,7 +446,7 @@ def _build_top_albums_tiles(conn: Connection, current_time: int) -> int:
 		ORDER BY scrobbles DESC
 		LIMIT :limit
 	"""), {"limit": TOP_N_LIMIT})
-	top_albums_all = _add_ranks_to_results(result.fetchall(), field_name="album", name_idx=1, id_idx=0, scrobbles_idx=3, artists_idx=2, artist_separator=', ')
+	top_albums_all = _add_ranks_to_results(result.fetchall(), field_name="album", name_idx=1, id_idx=0, scrobbles_idx=3, artists_idx=2, artist_separator='||')
 	_store_cache_entry(conn, CacheKey.TOP_ALBUMS_ALL.value, top_albums_all, current_time)
 	tiles_built += 1
 
