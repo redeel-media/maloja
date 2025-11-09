@@ -75,14 +75,24 @@ class Listenbrainz(APIHandler):
 					if k in additional
 				}
 
-				self.scrobble({
-					'track_artists':[artiststr],
-					'track_title':titlestr,
-					'album_title':albumstr,
-					'scrobble_time':timestamp,
+				# Build scrobble data
+				scrobble_data = {
+					'track_artists': [artiststr],
+					'track_title': titlestr,
+					'album_title': albumstr,
+					'scrobble_time': timestamp,
 					'track_length': additional.get("duration"),
 					**extrafields
-				},client=client)
+				}
+
+				# Extract album artist if provided
+				# Note: Navidrome currently doesn't send this, but we support it for future compatibility
+				if 'album_artist' in additional:
+					scrobble_data['album_artists'] = [additional['album_artist']]
+				elif 'albumartist' in additional:
+					scrobble_data['album_artists'] = [additional['albumartist']]
+
+				self.scrobble(scrobble_data, client=client)
 
 			return 200,{"status":"ok"}
 

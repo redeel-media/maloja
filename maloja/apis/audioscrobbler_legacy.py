@@ -74,6 +74,7 @@ class AudioscrobblerLegacy(APIHandler):
 		for count in range(50):
 			artist_key = f"a[{count}]"
 			album_key = f"b[{count}]"
+			album_artist_key = f"albumArtist[{count}]"  # Album artist parameter
 			length_key = f"l[{count}]"
 			track_key = f"t[{count}]"
 			time_key = f"i[{count}]"
@@ -91,7 +92,9 @@ class AudioscrobblerLegacy(APIHandler):
 				'scrobble_time':timestamp,
 			}
 			if album_key in keys:
-				scrobble['album_name'] = keys[album_key]
+				scrobble['album_title'] = keys[album_key]
+			if album_artist_key in keys:
+				scrobble['album_artists'] = [keys[album_artist_key]]
 			if length_key in keys:
 				scrobble['track_length'] = keys[length_key]
 

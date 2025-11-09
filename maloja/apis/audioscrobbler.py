@@ -100,22 +100,58 @@ class Audioscrobbler(APIHandler):
 		if not client:
 			raise InvalidSessionKey()
 		if "track" in keys and "artist" in keys:
+			# Single scrobble submission
 			artiststr,titlestr = keys["artist"], keys["track"]
-			#(artists,title) = cla.fullclean(artiststr,titlestr)
 			try:
 				timestamp = int(keys["timestamp"])
 			except Exception:
 				timestamp = None
-			#database.createScrobble(artists,title,timestamp)
-			self.scrobble({'track_artists':[artiststr],'track_title':titlestr,'scrobble_time':timestamp},client=client)
+
+			# Build scrobble data
+			scrobble_data = {
+				'track_artists': [artiststr],
+				'track_title': titlestr,
+				'scrobble_time': timestamp
+			}
+
+			# Extract album information if provided
+			if 'album' in keys:
+				scrobble_data['album_title'] = keys['album']
+
+			# Extract album artist if provided (Navidrome sends this!)
+			if 'albumArtist' in keys:
+				scrobble_data['album_artists'] = [keys['albumArtist']]
+
+			self.scrobble(scrobble_data, client=client)
 		else:
+			# Batch scrobble submission
 			for num in range(50):
 				if "track[" + str(num) + "]" in keys:
-					artiststr,titlestr = keys["artist[" + str(num) + "]"], keys["track[" + str(num) + "]"]
-					#(artists,title) = cla.fullclean(artiststr,titlestr)
-					timestamp = int(keys["timestamp[" + str(num) + "]"])
-					#database.createScrobble(artists,title,timestamp)
-					self.scrobble(artiststr,titlestr,time=timestamp)
+					artiststr = keys["artist[" + str(num) + "]"]
+					titlestr = keys["track[" + str(num) + "]"]
+					try:
+						timestamp = int(keys["timestamp[" + str(num) + "]"])
+					except Exception:
+						timestamp = None
+
+					# Build scrobble data
+					scrobble_data = {
+						'track_artists': [artiststr],
+						'track_title': titlestr,
+						'scrobble_time': timestamp
+					}
+
+					# Extract album information if provided
+					album_key = "album[" + str(num) + "]"
+					if album_key in keys:
+						scrobble_data['album_title'] = keys[album_key]
+
+					# Extract album artist if provided
+					album_artist_key = "albumArtist[" + str(num) + "]"
+					if album_artist_key in keys:
+						scrobble_data['album_artists'] = [keys[album_artist_key]]
+
+					self.scrobble(scrobble_data, client=client)
 
 		return 200,{"scrobbles":{"@attr":{"ignored":0}}}
 

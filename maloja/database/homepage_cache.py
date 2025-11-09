@@ -91,72 +91,6 @@ class CacheKey(str, Enum):
 	TOP_ALBUMS_ALL = "home:top_albums:all"
 
 
-def _add_ranks_to_results(
-	rows: List[tuple],
-	field_name: str,
-	name_idx: int,
-	id_idx: int,
-	scrobbles_idx: int,
-	artists_idx: int = None,
-	artist_separator: str = '||'
-) -> List[Dict[str, Any]]:
-	"""
-	Add rank field to query results with proper tie handling
-
-	Matches the behavior of the existing rank() function in sqldb.py:
-	- Ranks start at 1
-	- Entries with equal scrobbles get the same rank
-	- Next rank after a tie skips numbers (e.g., 1, 2, 2, 4)
-
-	Args:
-		rows: Query result rows (sorted by scrobbles DESC)
-		field_name: Name of entity field ("artist", "track", or "album")
-		name_idx: Index of name/title in row tuple
-		id_idx: Index of entity ID in row tuple
-		scrobbles_idx: Index of scrobbles count in row tuple
-		artists_idx: Optional index of concatenated artists string (for tracks/albums)
-		artist_separator: Separator used in GROUP_CONCAT (default '||', or ', ' for DISTINCT)
-
-	Returns:
-		List of dicts with entity name, ID, rank, scrobbles, and real_scrobbles
-
-	Example:
-		>>> rows = [(1, "Artist A", 100), (2, "Artist B", 100), (3, "Artist C", 50)]
-		>>> _add_ranks_to_results(rows, "artist", 1, 0, 2)
-		[
-			{"artist": "Artist A", "artist_id": 1, "rank": 1, "scrobbles": 100, "real_scrobbles": 100},
-			{"artist": "Artist B", "artist_id": 2, "rank": 1, "scrobbles": 100, "real_scrobbles": 100},
-			{"artist": "Artist C", "artist_id": 3, "rank": 3, "scrobbles": 50, "real_scrobbles": 50}
-		]
-	"""
-	results = []
-	for idx, row in enumerate(rows):
-		# Handle ties: if scrobbles match previous entry, use same rank
-		if idx == 0 or row[scrobbles_idx] < rows[idx-1][scrobbles_idx]:
-			rank = idx + 1
-		else:
-			rank = results[-1]["rank"]
-
-		entry = {
-			field_name: row[name_idx],
-			f"{field_name}_id": row[id_idx],
-			"rank": rank,
-			"scrobbles": row[scrobbles_idx],
-			"real_scrobbles": row[scrobbles_idx]  # For now, same as scrobbles (no associated artist logic)
-		}
-
-		# Add artists if provided (for tracks/albums)
-		if artists_idx is not None:
-			artists_str = row[artists_idx]
-			artists_list = artists_str.split(artist_separator) if artists_str else []
-			# Deduplicate artists: GROUP_CONCAT without DISTINCT creates duplicates (one per scrobble),
-			# but DISTINCT forces comma separator which breaks artists with commas in names
-			entry["artists"] = list(dict.fromkeys(artists_list))
-
-		results.append(entry)
-	return results
-
-
 def _calculate_calendar_ranges(current_time: int, conn: Connection) -> Tuple[int, int, int, int]:
 	"""
 	Calculate calendar boundary timestamps for today, this week, this month, this year
@@ -247,134 +181,147 @@ def build_homepage_cache(engine: Engine) -> None:
 
 def _build_top_artists_tiles(conn: Connection, current_time: int) -> int:
 	"""Build top artists tiles for 5 calendar timeranges: today, week, month, year, all"""
+	from .charts.tops import get_top_artists_direct_impl
+
 	tiles_built = 0
 
 	# Calculate calendar boundaries
 	today_start, week_start, month_start, year_start = _calculate_calendar_ranges(current_time, conn)
 
-	# Base query for time-filtered top artists
-	base_query = """
-		SELECT
-			a.id,
-			a.name,
-			COUNT(*) as scrobbles
-		FROM scrobbles s
-		JOIN trackartists ta ON s.track_id = ta.track_id
-		JOIN artists a ON ta.artist_id = a.id
-		WHERE s.timestamp >= :start_ts
-		GROUP BY a.id, a.name
-		ORDER BY scrobbles DESC
-		LIMIT :limit
-	"""
-
 	# Today
-	result = conn.execute(sql.text(base_query), {"start_ts": today_start, "limit": TOP_N_LIMIT})
-	top_artists_today = _add_ranks_to_results(result.fetchall(), field_name="artist", name_idx=1, id_idx=0, scrobbles_idx=2)
+	top_artists = get_top_artists_direct_impl(since=today_start, to=current_time, associated=False, resolve_ids=True, limit=TOP_N_LIMIT, dbconn=conn)
+	top_artists_today = _convert_charts_to_cache_format(top_artists, entity_type='artist')
 	_store_cache_entry(conn, CacheKey.TOP_ARTISTS_TODAY.value, top_artists_today, current_time)
 	tiles_built += 1
 
 	# This Week
-	result = conn.execute(sql.text(base_query), {"start_ts": week_start, "limit": TOP_N_LIMIT})
-	top_artists_week = _add_ranks_to_results(result.fetchall(), field_name="artist", name_idx=1, id_idx=0, scrobbles_idx=2)
+	top_artists = get_top_artists_direct_impl(since=week_start, to=current_time, associated=False, resolve_ids=True, limit=TOP_N_LIMIT, dbconn=conn)
+	top_artists_week = _convert_charts_to_cache_format(top_artists, entity_type='artist')
 	_store_cache_entry(conn, CacheKey.TOP_ARTISTS_WEEK.value, top_artists_week, current_time)
 	tiles_built += 1
 
 	# This Month
-	result = conn.execute(sql.text(base_query), {"start_ts": month_start, "limit": TOP_N_LIMIT})
-	top_artists_month = _add_ranks_to_results(result.fetchall(), field_name="artist", name_idx=1, id_idx=0, scrobbles_idx=2)
+	top_artists = get_top_artists_direct_impl(since=month_start, to=current_time, associated=False, resolve_ids=True, limit=TOP_N_LIMIT, dbconn=conn)
+	top_artists_month = _convert_charts_to_cache_format(top_artists, entity_type='artist')
 	_store_cache_entry(conn, CacheKey.TOP_ARTISTS_MONTH.value, top_artists_month, current_time)
 	tiles_built += 1
 
 	# This Year
-	result = conn.execute(sql.text(base_query), {"start_ts": year_start, "limit": TOP_N_LIMIT})
-	top_artists_year = _add_ranks_to_results(result.fetchall(), field_name="artist", name_idx=1, id_idx=0, scrobbles_idx=2)
+	top_artists = get_top_artists_direct_impl(since=year_start, to=current_time, associated=False, resolve_ids=True, limit=TOP_N_LIMIT, dbconn=conn)
+	top_artists_year = _convert_charts_to_cache_format(top_artists, entity_type='artist')
 	_store_cache_entry(conn, CacheKey.TOP_ARTISTS_YEAR.value, top_artists_year, current_time)
 	tiles_built += 1
 
 	# All Time (no time filter)
-	result = conn.execute(sql.text("""
-		SELECT
-			a.id,
-			a.name,
-			COUNT(*) as scrobbles
-		FROM scrobbles s
-		JOIN trackartists ta ON s.track_id = ta.track_id
-		JOIN artists a ON ta.artist_id = a.id
-		GROUP BY a.id, a.name
-		ORDER BY scrobbles DESC
-		LIMIT :limit
-	"""), {"limit": TOP_N_LIMIT})
-	top_artists_all = _add_ranks_to_results(result.fetchall(), field_name="artist", name_idx=1, id_idx=0, scrobbles_idx=2)
+	top_artists = get_top_artists_direct_impl(since=0, to=None, associated=False, resolve_ids=True, limit=TOP_N_LIMIT, dbconn=conn)
+	top_artists_all = _convert_charts_to_cache_format(top_artists, entity_type='artist')
 	_store_cache_entry(conn, CacheKey.TOP_ARTISTS_ALL.value, top_artists_all, current_time)
 	tiles_built += 1
 
 	return tiles_built
 
 
+def _convert_charts_to_cache_format(chart_results: List[Dict[str, Any]], entity_type: str) -> List[Dict[str, Any]]:
+	"""
+	Convert charts layer format to homepage cache format.
+
+	Charts layer format:
+	  - track: {"title": "...", "artists": ["A", "B"]}
+	  - track_id: 123
+	  - rank: 1
+	  - scrobbles: 100
+
+	Cache format:
+	  - track: "..."
+	  - track_id: 123
+	  - rank: 1
+	  - scrobbles: 100
+	  - real_scrobbles: 100
+	  - artists: ["A", "B"]
+
+	Args:
+		chart_results: Results from charts layer (get_top_*_direct_impl)
+		entity_type: 'track', 'album', or 'artist'
+
+	Returns:
+		Results in cache format
+	"""
+	cache_results = []
+
+	for item in chart_results:
+		if entity_type == 'track':
+			track_info = item['track']
+			cache_entry = {
+				'track': track_info['title'],
+				'track_id': item['track_id'],
+				'rank': item['rank'],
+				'scrobbles': item['scrobbles'],
+				'real_scrobbles': item['scrobbles'],
+				'artists': track_info['artists']
+			}
+		elif entity_type == 'album':
+			album_info = item['album']
+			cache_entry = {
+				'album': album_info['albumtitle'],
+				'album_id': item['album_id'],
+				'rank': item['rank'],
+				'scrobbles': item['scrobbles'],
+				'real_scrobbles': item['scrobbles'],
+				'artists': album_info['artists']
+			}
+		elif entity_type == 'artist':
+			# item['artist'] is already the artist name string
+			cache_entry = {
+				'artist': item['artist'],
+				'artist_id': item['artist_id'],
+				'rank': item['rank'],
+				'scrobbles': item['scrobbles'],
+				'real_scrobbles': item.get('real_scrobbles', item['scrobbles'])
+			}
+		else:
+			raise ValueError(f"Invalid entity_type: {entity_type}")
+
+		cache_results.append(cache_entry)
+
+	return cache_results
+
+
 def _build_top_tracks_tiles(conn: Connection, current_time: int) -> int:
 	"""Build top tracks tiles for 5 calendar timeranges: today, week, month, year, all"""
+	from .charts.tops import get_top_tracks_direct_impl
+
 	tiles_built = 0
 
 	# Calculate calendar boundaries
 	today_start, week_start, month_start, year_start = _calculate_calendar_ranges(current_time, conn)
 
-	# Base query for time-filtered top tracks
-	base_query = """
-		SELECT
-			t.id,
-			t.title,
-			GROUP_CONCAT(a.name, '||') as artists,
-			COUNT(*) as scrobbles
-		FROM scrobbles s
-		JOIN tracks t ON s.track_id = t.id
-		JOIN trackartists ta ON t.id = ta.track_id
-		JOIN artists a ON ta.artist_id = a.id
-		WHERE s.timestamp >= :start_ts
-		GROUP BY t.id, t.title
-		ORDER BY scrobbles DESC
-		LIMIT :limit
-	"""
-
 	# Today
-	result = conn.execute(sql.text(base_query), {"start_ts": today_start, "limit": TOP_N_LIMIT})
-	top_tracks_today = _add_ranks_to_results(result.fetchall(), field_name="track", name_idx=1, id_idx=0, scrobbles_idx=3, artists_idx=2, artist_separator='||')
+	top_tracks = get_top_tracks_direct_impl(since=today_start, to=current_time, resolve_ids=True, limit=TOP_N_LIMIT, dbconn=conn)
+	top_tracks_today = _convert_charts_to_cache_format(top_tracks, entity_type='track')
 	_store_cache_entry(conn, CacheKey.TOP_TRACKS_TODAY.value, top_tracks_today, current_time)
 	tiles_built += 1
 
 	# This Week
-	result = conn.execute(sql.text(base_query), {"start_ts": week_start, "limit": TOP_N_LIMIT})
-	top_tracks_week = _add_ranks_to_results(result.fetchall(), field_name="track", name_idx=1, id_idx=0, scrobbles_idx=3, artists_idx=2, artist_separator='||')
+	top_tracks = get_top_tracks_direct_impl(since=week_start, to=current_time, resolve_ids=True, limit=TOP_N_LIMIT, dbconn=conn)
+	top_tracks_week = _convert_charts_to_cache_format(top_tracks, entity_type='track')
 	_store_cache_entry(conn, CacheKey.TOP_TRACKS_WEEK.value, top_tracks_week, current_time)
 	tiles_built += 1
 
 	# This Month
-	result = conn.execute(sql.text(base_query), {"start_ts": month_start, "limit": TOP_N_LIMIT})
-	top_tracks_month = _add_ranks_to_results(result.fetchall(), field_name="track", name_idx=1, id_idx=0, scrobbles_idx=3, artists_idx=2, artist_separator='||')
+	top_tracks = get_top_tracks_direct_impl(since=month_start, to=current_time, resolve_ids=True, limit=TOP_N_LIMIT, dbconn=conn)
+	top_tracks_month = _convert_charts_to_cache_format(top_tracks, entity_type='track')
 	_store_cache_entry(conn, CacheKey.TOP_TRACKS_MONTH.value, top_tracks_month, current_time)
 	tiles_built += 1
 
 	# This Year
-	result = conn.execute(sql.text(base_query), {"start_ts": year_start, "limit": TOP_N_LIMIT})
-	top_tracks_year = _add_ranks_to_results(result.fetchall(), field_name="track", name_idx=1, id_idx=0, scrobbles_idx=3, artists_idx=2, artist_separator='||')
+	top_tracks = get_top_tracks_direct_impl(since=year_start, to=current_time, resolve_ids=True, limit=TOP_N_LIMIT, dbconn=conn)
+	top_tracks_year = _convert_charts_to_cache_format(top_tracks, entity_type='track')
 	_store_cache_entry(conn, CacheKey.TOP_TRACKS_YEAR.value, top_tracks_year, current_time)
 	tiles_built += 1
 
 	# All Time (no time filter)
-	result = conn.execute(sql.text("""
-		SELECT
-			t.id,
-			t.title,
-			GROUP_CONCAT(a.name, '||') as artists,
-			COUNT(*) as scrobbles
-		FROM scrobbles s
-		JOIN tracks t ON s.track_id = t.id
-		JOIN trackartists ta ON t.id = ta.track_id
-		JOIN artists a ON ta.artist_id = a.id
-		GROUP BY t.id, t.title
-		ORDER BY scrobbles DESC
-		LIMIT :limit
-	"""), {"limit": TOP_N_LIMIT})
-	top_tracks_all = _add_ranks_to_results(result.fetchall(), field_name="track", name_idx=1, id_idx=0, scrobbles_idx=3, artists_idx=2, artist_separator='||')
+	top_tracks = get_top_tracks_direct_impl(since=0, to=None, resolve_ids=True, limit=TOP_N_LIMIT, dbconn=conn)
+	top_tracks_all = _convert_charts_to_cache_format(top_tracks, entity_type='track')
 	_store_cache_entry(conn, CacheKey.TOP_TRACKS_ALL.value, top_tracks_all, current_time)
 	tiles_built += 1
 
@@ -383,70 +330,40 @@ def _build_top_tracks_tiles(conn: Connection, current_time: int) -> int:
 
 def _build_top_albums_tiles(conn: Connection, current_time: int) -> int:
 	"""Build top albums tiles for 5 calendar timeranges: today, week, month, year, all"""
+	from .charts.tops import get_top_albums_direct_impl
+
 	tiles_built = 0
 
 	# Calculate calendar boundaries
 	today_start, week_start, month_start, year_start = _calculate_calendar_ranges(current_time, conn)
 
-	# Base query for time-filtered top albums
-	base_query = """
-		SELECT
-			alb.id,
-			alb.albtitle,
-			GROUP_CONCAT(a.name, '||') as artists,
-			COUNT(*) as scrobbles
-		FROM scrobbles s
-		JOIN tracks t ON s.track_id = t.id
-		JOIN albums alb ON t.album_id = alb.id
-		JOIN trackartists ta ON t.id = ta.track_id
-		JOIN artists a ON ta.artist_id = a.id
-		WHERE s.timestamp >= :start_ts
-		GROUP BY alb.id, alb.albtitle
-		ORDER BY scrobbles DESC
-		LIMIT :limit
-	"""
-
 	# Today
-	result = conn.execute(sql.text(base_query), {"start_ts": today_start, "limit": TOP_N_LIMIT})
-	top_albums_today = _add_ranks_to_results(result.fetchall(), field_name="album", name_idx=1, id_idx=0, scrobbles_idx=3, artists_idx=2, artist_separator='||')
+	top_albums = get_top_albums_direct_impl(since=today_start, to=current_time, resolve_ids=True, limit=TOP_N_LIMIT, dbconn=conn)
+	top_albums_today = _convert_charts_to_cache_format(top_albums, entity_type='album')
 	_store_cache_entry(conn, CacheKey.TOP_ALBUMS_TODAY.value, top_albums_today, current_time)
 	tiles_built += 1
 
 	# This Week
-	result = conn.execute(sql.text(base_query), {"start_ts": week_start, "limit": TOP_N_LIMIT})
-	top_albums_week = _add_ranks_to_results(result.fetchall(), field_name="album", name_idx=1, id_idx=0, scrobbles_idx=3, artists_idx=2, artist_separator='||')
+	top_albums = get_top_albums_direct_impl(since=week_start, to=current_time, resolve_ids=True, limit=TOP_N_LIMIT, dbconn=conn)
+	top_albums_week = _convert_charts_to_cache_format(top_albums, entity_type='album')
 	_store_cache_entry(conn, CacheKey.TOP_ALBUMS_WEEK.value, top_albums_week, current_time)
 	tiles_built += 1
 
 	# This Month
-	result = conn.execute(sql.text(base_query), {"start_ts": month_start, "limit": TOP_N_LIMIT})
-	top_albums_month = _add_ranks_to_results(result.fetchall(), field_name="album", name_idx=1, id_idx=0, scrobbles_idx=3, artists_idx=2, artist_separator='||')
+	top_albums = get_top_albums_direct_impl(since=month_start, to=current_time, resolve_ids=True, limit=TOP_N_LIMIT, dbconn=conn)
+	top_albums_month = _convert_charts_to_cache_format(top_albums, entity_type='album')
 	_store_cache_entry(conn, CacheKey.TOP_ALBUMS_MONTH.value, top_albums_month, current_time)
 	tiles_built += 1
 
 	# This Year
-	result = conn.execute(sql.text(base_query), {"start_ts": year_start, "limit": TOP_N_LIMIT})
-	top_albums_year = _add_ranks_to_results(result.fetchall(), field_name="album", name_idx=1, id_idx=0, scrobbles_idx=3, artists_idx=2, artist_separator='||')
+	top_albums = get_top_albums_direct_impl(since=year_start, to=current_time, resolve_ids=True, limit=TOP_N_LIMIT, dbconn=conn)
+	top_albums_year = _convert_charts_to_cache_format(top_albums, entity_type='album')
 	_store_cache_entry(conn, CacheKey.TOP_ALBUMS_YEAR.value, top_albums_year, current_time)
 	tiles_built += 1
 
 	# All Time (no time filter)
-	result = conn.execute(sql.text("""
-		SELECT
-			alb.id,
-			alb.albtitle,
-			GROUP_CONCAT(a.name, '||') as artists,
-			COUNT(*) as scrobbles
-		FROM scrobbles s
-		JOIN tracks t ON s.track_id = t.id
-		JOIN albums alb ON t.album_id = alb.id
-		JOIN trackartists ta ON t.id = ta.track_id
-		JOIN artists a ON ta.artist_id = a.id
-		GROUP BY alb.id, alb.albtitle
-		ORDER BY scrobbles DESC
-		LIMIT :limit
-	"""), {"limit": TOP_N_LIMIT})
-	top_albums_all = _add_ranks_to_results(result.fetchall(), field_name="album", name_idx=1, id_idx=0, scrobbles_idx=3, artists_idx=2, artist_separator='||')
+	top_albums = get_top_albums_direct_impl(since=0, to=None, resolve_ids=True, limit=TOP_N_LIMIT, dbconn=conn)
+	top_albums_all = _convert_charts_to_cache_format(top_albums, entity_type='album')
 	_store_cache_entry(conn, CacheKey.TOP_ALBUMS_ALL.value, top_albums_all, current_time)
 	tiles_built += 1
 

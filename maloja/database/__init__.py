@@ -1,5 +1,6 @@
 # server
 from bottle import request, response, FormsDict
+from functools import wraps
 
 from ..pkg_global import conf
 
@@ -7,6 +8,7 @@ from ..pkg_global import conf
 # decorator that makes sure this function is only run in normal operation,
 # not when we run a task that needs to access the database
 def no_aux_mode(func):
+	@wraps(func)
 	def wrapper(*args,**kwargs):
 		from ..pkg_global import conf
 		if conf.AUX_MODE: return
@@ -359,7 +361,9 @@ def get_scrobbles(dbconn=None,**keys):
 
 	#print(result)
 
-	return list(result[behead:])
+	result_list = list(result[behead:])
+
+	return result_list
 
 
 @waitfordb
@@ -589,7 +593,6 @@ def get_charts_albums(dbconn=None,resolve_ids=True,only_own_albums=False,**keys)
 
 @waitfordb
 def get_pulse(dbconn=None,**keys):
-
 	# amountkeys for pulse and performance aren't really necessary
 	# since the amount of entries is completely determined by the time keys
 	# but lets just include it in case
@@ -628,7 +631,6 @@ def get_pulse(dbconn=None,**keys):
 
 @waitfordb
 def get_performance(dbconn=None,**keys):
-
 	# amountkeys for pulse and performance aren't really necessary
 	# since the amount of entries is completely determined by the time keys
 	# but lets just include it in case
@@ -642,65 +644,57 @@ def get_performance(dbconn=None,**keys):
 
 	separate = keys.get('separate')
 
-	rngs = ranges(**{k:keys[k] for k in keys if k in ["since","to","within","timerange","step","stepn","trail"]})
-	if reverse: rngs = reversed(list(rngs))
-	results = []
+	# Get all time ranges first
+	all_rngs = list(ranges(**{k:keys[k] for k in keys if k in ["since","to","within","timerange","step","stepn","trail"]}))
+	if reverse: all_rngs = list(reversed(all_rngs))
 
-	for rng in rngs:
+	# Apply pagination
+	if limit != math.inf:
+		all_rngs = all_rngs[behead:behead+limit]
+	elif behead > 0:
+		all_rngs = all_rngs[behead:]
 
-		# count down how many we need
-		if limit==0:
-			break
-		limit -= 1
+	# Optimized: Batch all periods into single query (48 queries → 1 query)
+	if "track" in keys:
+		track_id = sqldb.get_track_id(keys['track'],create_new=False,dbconn=dbconn)
+		if not track_id:
+			raise exceptions.TrackDoesNotExist(keys['track'])
+		# Extract timestamps for batch query
+		periods = [rng.timestamps() for rng in all_rngs]
+		# Single batched query for all periods
+		batch_results = sqldb.get_track_ranks_batch(track_id, periods, dbconn=dbconn)
+		# Map results back to ranges
+		results_map = {r['period_index']: r for r in batch_results}
+		results = [{"range": rng, "rank": results_map[idx]['rank']} for idx, rng in enumerate(all_rngs)]
 
-		# skip prev pages
-		if behead>0:
-			behead -= 1
-			continue
+	elif "artist" in keys:
+		artist_id = sqldb.get_artist_id(keys['artist'],create_new=False,dbconn=dbconn)
+		if not artist_id:
+			raise exceptions.ArtistDoesNotExist(keys['artist'])
+		# Extract timestamps for batch query
+		periods = [rng.timestamps() for rng in all_rngs]
+		# Note: separate parameter not used in rank calculation (only affects display)
+		associated = not separate if separate is not None else True
+		# Single batched query for all periods
+		batch_results = sqldb.get_artist_ranks_batch(artist_id, periods, associated=associated, dbconn=dbconn)
+		# Map results back to ranges
+		results_map = {r['period_index']: r for r in batch_results}
+		results = [{"range": rng, "rank": results_map[idx]['rank']} for idx, rng in enumerate(all_rngs)]
 
+	elif "album" in keys:
+		album_id = sqldb.get_album_id(keys['album'],create_new=False,dbconn=dbconn)
+		if not album_id:
+			raise exceptions.AlbumDoesNotExist(keys['album'])
+		# Extract timestamps for batch query
+		periods = [rng.timestamps() for rng in all_rngs]
+		# Single batched query for all periods
+		batch_results = sqldb.get_album_ranks_batch(album_id, periods, dbconn=dbconn)
+		# Map results back to ranges
+		results_map = {r['period_index']: r for r in batch_results}
+		results = [{"range": rng, "rank": results_map[idx]['rank']} for idx, rng in enumerate(all_rngs)]
 
-
-
-
-
-		if "track" in keys:
-			track_id = sqldb.get_track_id(keys['track'],create_new=False,dbconn=dbconn)
-			if not track_id:
-				raise exceptions.TrackDoesNotExist(keys['track'])
-			#track = sqldb.get_track(track_id,dbconn=dbconn)
-			charts = get_charts_tracks(timerange=rng,resolve_ids=False,dbconn=dbconn)
-			rank = None
-			for c in charts:
-				if c["track_id"] == track_id:
-					rank = c["rank"]
-					break
-		elif "artist" in keys:
-			artist_id = sqldb.get_artist_id(keys['artist'],create_new=False,dbconn=dbconn)
-			if not artist_id:
-				raise exceptions.ArtistDoesNotExist(keys['artist'])
-			#artist = sqldb.get_artist(artist_id,dbconn=dbconn)
-			# ^this is the most useless line in programming history
-			# but I like consistency
-			charts = get_charts_artists(timerange=rng,resolve_ids=False,separate=separate,dbconn=dbconn)
-			rank = None
-			for c in charts:
-				if c["artist_id"] == artist_id:
-					rank = c["rank"]
-					break
-		elif "album" in keys:
-			album_id = sqldb.get_album_id(keys['album'],create_new=False,dbconn=dbconn)
-			if not album_id:
-				raise exceptions.AlbumDoesNotExist(keys['album'])
-			#album = sqldb.get_album(album_id,dbconn=dbconn)
-			charts = get_charts_albums(timerange=rng,resolve_ids=False,dbconn=dbconn)
-			rank = None
-			for c in charts:
-				if c["album_id"] == album_id:
-					rank = c["rank"]
-					break
-		else:
-			raise exceptions.MissingEntityParameter()
-		results.append({"range":rng,"rank":rank})
+	else:
+		raise exceptions.MissingEntityParameter()
 
 	return results
 
@@ -785,7 +779,6 @@ def get_top_albums(dbconn=None,compatibility=True,**keys):
 
 @waitfordb
 def artist_info(dbconn=None,**keys):
-
 	artist = keys.get('artist')
 	if artist is None: raise exceptions.MissingEntityParameter()
 
@@ -793,14 +786,16 @@ def artist_info(dbconn=None,**keys):
 	if not artist_id: raise exceptions.ArtistDoesNotExist(artist)
 
 	artist = sqldb.get_artist(artist_id,dbconn=dbconn)
-	alltimecharts = get_charts_artists(timerange=alltime(),dbconn=dbconn)
+
 	#we cant take the scrobble number from the charts because that includes all countas scrobbles
 	scrobbles = get_scrobbles_num(artist=artist,timerange=alltime(),dbconn=dbconn)
+
 	albums = sqldb.get_albums_of_artists(set([artist_id]),dbconn=dbconn)
 	isalbumartist = len(albums.get(artist_id,[]))>0
 
 	cert = None
 	own_track_charts = get_charts_tracks(timerange=alltime(),resolve_ids=False,artist=artist,dbconn=dbconn)
+
 	own_album_charts = get_charts_albums(timerange=alltime(),resolve_ids=True,artist=artist,dbconn=dbconn)
 	# we resolve ids here which we don't need to. however, on the jinja page we make that same call
 	# later again with resolve ids, so its a cache miss and it doubles page load time
@@ -834,17 +829,24 @@ def artist_info(dbconn=None,**keys):
 
 	# check if credited to someone else
 	parent_artists = sqldb.get_credited_artists(artist)
+
 	if len(parent_artists) == 0:
-		c = [e for e in alltimecharts if e["artist"] == artist]
-		position = c[0]["rank"] if len(c) > 0 else None
+		# Optimized: Get rank directly instead of ranking all artists
+		(since, to) = alltime().timestamps()
+		rank_data = sqldb.get_artist_rank(artist_id, since, to, associated=True, dbconn=dbconn)
+		position = rank_data['rank']
+
 		others = sqldb.get_associated_artists(artist,dbconn=dbconn)
+
 		# Optimized: Get both medals and topweeks in 1 query instead of several queries
 		try:
 			medals_data = sqldb.get_artist_medals_and_topweeks(artist_id, associated=True, dbconn=dbconn)
 			medals = medals_data.get('medals', {'gold': [], 'silver': [], 'bronze': []})
 			topweeks_count = medals_data.get('topweeks', 0)
-		except Exception:
+		except Exception as e:
 			# Fall back to old method if optimized fails (shouldn't happen)
+			from doreah.logging import log
+			log(f"[ARTIST_INFO] ERROR: get_artist_medals_and_topweeks failed, falling back to old method: {e}")
 			medals = {
 				"gold": [year.desc() for year in ranges(step='year') if (year != tyr) and any(
 					(e.get('artist_id') == artist_id) and (e.get('rank') == 1) for e in
@@ -875,8 +877,14 @@ def artist_info(dbconn=None,**keys):
 
 	else:
 		replaceartist = parent_artists[0]
-		c = next((e for e in alltimecharts if e["artist"] == replaceartist), None)
-		position = c["rank"] if c else None
+		# Optimized: Get rank directly instead of ranking all artists
+		replaceartist_id = sqldb.get_artist_id(replaceartist, create_new=False, dbconn=dbconn)
+		if replaceartist_id:
+			(since, to) = alltime().timestamps()
+			rank_data = sqldb.get_artist_rank(replaceartist_id, since, to, associated=True, dbconn=dbconn)
+			position = rank_data['rank']
+		else:
+			position = None
 		result.update({
 			"replace":replaceartist,
 			"position":position
@@ -888,6 +896,9 @@ def artist_info(dbconn=None,**keys):
 
 @waitfordb
 def track_info(dbconn=None,**keys):
+	import time
+	from doreah.logging import log
+	start_time = time.time()
 
 	track = keys.get('track')
 	if track is None: raise exceptions.MissingEntityParameter()
@@ -896,17 +907,12 @@ def track_info(dbconn=None,**keys):
 	if not track_id: raise exceptions.TrackDoesNotExist(track)
 
 	track = sqldb.get_track(track_id,dbconn=dbconn)
-	alltimecharts = get_charts_tracks(timerange=alltime(),dbconn=dbconn)
 
-	# Find track in charts, fallback to counting scrobbles if not found
-	c = next((e for e in alltimecharts if e["track_id"] == track_id), None)
-	if c:
-		scrobbles = c["scrobbles"]
-		position = c["rank"]
-	else:
-		# Track not in charts (no scrobbles or chart limit reached)
-		scrobbles = get_scrobbles_num(track=track,timerange=alltime())
-		position = None
+	# Optimized: Get rank directly instead of ranking all tracks
+	(since, to) = alltime().timestamps()
+	rank_data = sqldb.get_track_rank(track_id, since, to, dbconn=dbconn)
+	scrobbles = rank_data['scrobbles']
+	position = rank_data['rank']
 	cert = None
 	threshold_gold, threshold_platinum, threshold_diamond = malojaconfig["SCROBBLES_GOLD","SCROBBLES_PLATINUM","SCROBBLES_DIAMOND"]
 	if scrobbles >= threshold_diamond: cert = "diamond"
@@ -921,7 +927,7 @@ def track_info(dbconn=None,**keys):
 		medals_data = sqldb.get_track_medals_and_topweeks(track_id, dbconn=dbconn)
 		medals = medals_data.get('medals', {'gold': [], 'silver': [], 'bronze': []})
 		topweeks_count = medals_data.get('topweeks', 0)
-	except Exception:
+	except Exception as e:
 		# Fall back to old method if optimized fails (shouldn't happen)
 		medals = {
 			"gold": [year.desc() for year in ranges(step='year') if (year != tyr) and any(
@@ -944,6 +950,9 @@ def track_info(dbconn=None,**keys):
 			)
 		])
 
+	total_time = time.time() - start_time
+	log(f"[TRACK_INFO] TOTAL track_info: {total_time:.3f}s")
+
 	return {
 		"track":track,
 		"scrobbles":scrobbles,
@@ -957,6 +966,9 @@ def track_info(dbconn=None,**keys):
 
 @waitfordb
 def album_info(dbconn=None,reduced=False,**keys):
+	import time
+	from doreah.logging import log
+	start_time = time.time()
 
 	album = keys.get('album')
 	if album is None: raise exceptions.MissingEntityParameter()
@@ -971,17 +983,12 @@ def album_info(dbconn=None,reduced=False,**keys):
 	if reduced:
 		scrobbles = get_scrobbles_num(album=album,timerange=alltime())
 	else:
-		alltimecharts = get_charts_albums(timerange=alltime(),dbconn=dbconn)
-		# Find album in charts, fallback to counting scrobbles if not found
-		c = next((e for e in alltimecharts if e["album"] == album), None)
-		if c:
-			scrobbles = c["scrobbles"]
-			position = c["rank"]
-			extrainfo['position'] = position
-		else:
-			# Album not in charts (no scrobbles or chart limit reached)
-			scrobbles = get_scrobbles_num(album=album,timerange=alltime())
-			extrainfo['position'] = None
+		# Optimized: Get rank directly instead of ranking all albums
+		(since, to) = alltime().timestamps()
+		rank_data = sqldb.get_album_rank(album_id, since, to, dbconn=dbconn)
+		scrobbles = rank_data['scrobbles']
+		position = rank_data['rank']
+		extrainfo['position'] = position
 
 	cert = None
 	threshold_gold, threshold_platinum, threshold_diamond = malojaconfig["SCROBBLES_GOLD_ALBUM","SCROBBLES_PLATINUM_ALBUM","SCROBBLES_DIAMOND_ALBUM"]
@@ -1000,7 +1007,7 @@ def album_info(dbconn=None,reduced=False,**keys):
 			medals_data = sqldb.get_album_medals_and_topweeks(album_id, dbconn=dbconn)
 			medals = medals_data.get('medals', {'gold': [], 'silver': [], 'bronze': []})
 			topweeks_count = medals_data.get('topweeks', 0)
-		except Exception:
+		except Exception as e:
 			# Fall back to old method if optimized fails (shouldn't happen)
 			medals = {
 				"gold": [year.desc() for year in ranges(step='year') if (year != tyr) and any(
@@ -1027,6 +1034,9 @@ def album_info(dbconn=None,reduced=False,**keys):
 			"medals": medals,
 			"topweeks": topweeks_count  # Optimized: 1 query instead of several
 		})
+
+	total_time = time.time() - start_time
+	log(f"[ALBUM_INFO] TOTAL album_info: {total_time:.3f}s")
 
 	return {
 		"album":album,

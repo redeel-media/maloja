@@ -108,6 +108,25 @@ def validate_migration_filename(filename):
 	return True, None
 
 
+def column_exists(conn, table_name, column_name):
+	"""
+	Check if a column exists in a table
+
+	Args:
+		conn: SQLAlchemy connection
+		table_name: Name of the table
+		column_name: Name of the column to check
+
+	Returns:
+		bool: True if column exists, False otherwise
+	"""
+	result = conn.execute(
+		sql.text("SELECT COUNT(*) as count FROM pragma_table_info(:table) WHERE name = :column"),
+		{"table": table_name, "column": column_name}
+	).fetchone()
+	return result.count > 0
+
+
 def get_available_migrations():
 	"""
 	Get list of all available migration files
@@ -232,6 +251,25 @@ def execute_migration(engine, migration_path, migration_name):
 			try:
 				with engine.begin() as conn:  # Auto-rollback on exception
 					for statement in regular_statements:
+						# Check if this is an ALTER TABLE ADD COLUMN statement
+						# These are not idempotent in SQLite, so we need to check first
+						statement_upper = statement.upper().strip()
+						if 'ALTER TABLE' in statement_upper and 'ADD COLUMN' in statement_upper:
+							# Parse table and column name from statement
+							# Pattern: ALTER TABLE table_name ADD COLUMN column_name ...
+							import re
+							match = re.search(r'ALTER\s+TABLE\s+(\w+)\s+ADD\s+COLUMN\s+(\w+)', statement, re.IGNORECASE)
+							if match:
+								table_name = match.group(1)
+								column_name = match.group(2)
+
+								# Check if column already exists
+								if column_exists(conn, table_name, column_name):
+									log(f"  Skipping: Column {table_name}.{column_name} already exists")
+									continue
+								else:
+									log(f"  Adding column: {table_name}.{column_name}")
+
 						conn.execute(sql.text(statement))
 				log(f"Successfully applied migration: {migration_name}")
 			except Exception as e:

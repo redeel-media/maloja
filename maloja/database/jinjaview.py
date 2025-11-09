@@ -20,6 +20,10 @@ class JinjaDBConnection:
 		self.misses = 0
 	def __enter__(self):
 		self.conn = engine.connect()
+		# Initialize lazy TEMP table state in Connection.info dict (proper SQLAlchemy pattern)
+		# This way ensure_request_cache() can check/set it via dbconn.info
+		self.conn.info['temp_cache_initialized'] = False
+		self.conn.info['temp_cache_artist_id'] = None
 		return self
 	def __exit__(self, exc_type, exc_value, exc_traceback):
 		self.conn.close()
